@@ -1,0 +1,11 @@
+{
+  "type": "music",
+  "domain": "audio_cd",
+  "name": "Audio CD",
+  "description": "Play audio CDs directly from a locally attached optical drive.",
+  "codeowners": [
+    "@Decibelnet"
+  ],
+  "requirements": [],
+  "documentation": "https://github.com/Decibelnet/MA_CD_Provider"
+}
