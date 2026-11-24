@@ -28,8 +28,9 @@ _TIME_RE = re.compile(r"\[(\d+):(\d{2})\.(\d{2})\]")
 
 
 def _time_to_seconds(value: str) -> int:
-    minutes, seconds, frames = (int(part) for part in value.split(":")[0:1] + value.split(":")[1].split("."))
-    return minutes * 60 + seconds + round(frames / 75)
+    minutes, remainder = value.split(":")
+    seconds, frames = remainder.split(".")
+    return int(minutes) * 60 + int(seconds) + round(int(frames) / 75)
 
 
 def _parse_tracks(output: str) -> list[tuple[int, int]]:
