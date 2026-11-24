@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
+import time
 from collections.abc import AsyncGenerator, Sequence
 
 from music_assistant_models.enums import (
@@ -25,6 +27,7 @@ from .drive import CDDrive, DriveError
 
 SUPPORTED_FEATURES = {ProviderFeature.BROWSE}
 _TIME_RE = re.compile(r"\[(\d+):(\d{2})\.(\d{2})\]")
+_DISC_CACHE_SECONDS = 5.0
 
 
 def _time_to_seconds(value: str) -> int:
@@ -71,19 +74,48 @@ class AudioCDProvider(MusicProvider):
         self.drive = CDDrive("/dev/sr0")
         self._disc_id: str | None = None
         self._tracks: list[tuple[int, int]] = []
+        self._disc_checked_at = 0.0
+        self._disc_refresh_lock = asyncio.Lock()
 
     @property
     def is_streaming_provider(self) -> bool:
         """CD tracks are transient and must never be cached as a local library."""
         return True
 
-    async def _refresh_disc(self) -> None:
-        output = await self.drive.query()
-        tracks = _parse_tracks(output)
-        if not tracks:
-            raise DriveError("No audio tracks were found on the inserted disc")
-        self._disc_id = hashlib.sha256(output.encode()).hexdigest()[:12]
-        self._tracks = tracks
+    async def _refresh_disc(self, *, force: bool = False) -> None:
+        """Refresh disc metadata, reusing a recent successful check when safe."""
+        now = time.monotonic()
+        if (
+            not force
+            and self._disc_checked_at
+            and now - self._disc_checked_at < _DISC_CACHE_SECONDS
+        ):
+            return
+
+        async with self._disc_refresh_lock:
+            # Another coroutine may have refreshed the disc while we waited.
+            now = time.monotonic()
+            if (
+                not force
+                and self._disc_checked_at
+                and now - self._disc_checked_at < _DISC_CACHE_SECONDS
+            ):
+                return
+
+            try:
+                output = await self.drive.query()
+                tracks = _parse_tracks(output)
+                if not tracks:
+                    raise DriveError("No audio tracks were found on the inserted disc")
+            except DriveError:
+                self._disc_id = None
+                self._tracks = []
+                self._disc_checked_at = 0.0
+                raise
+
+            self._disc_id = hashlib.sha256(output.encode()).hexdigest()[:12]
+            self._tracks = tracks
+            self._disc_checked_at = time.monotonic()
 
     async def get_track(self, prov_track_id: str) -> Track:
         """Return full details for a queued CD track, if its disc is still present."""
@@ -126,7 +158,8 @@ class AudioCDProvider(MusicProvider):
     async def browse(self, path: str) -> Sequence[Track | BrowseFolder]:
         """List the tracks on the disc currently in the drive."""
         try:
-            await self._refresh_disc()
+            # Browsing explicitly checks the drive so inserted/removed discs show promptly.
+            await self._refresh_disc(force=True)
         except DriveError:
             return []
         return [
