@@ -151,6 +151,7 @@ class AudioCDProvider(MusicProvider):
     ) -> AsyncGenerator[bytes]:
         """Read PCM from the drive without creating an audio file."""
         data = streamdetails.data or {}
+        await self._refresh_disc()
         if data.get("disc_id") != self._disc_id:
             raise DriveError("The disc has changed; refusing to stream the queued track")
         track_number = int(data["track_number"])
