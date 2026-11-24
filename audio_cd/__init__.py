@@ -85,6 +85,44 @@ class AudioCDProvider(MusicProvider):
         self._disc_id = hashlib.sha256(output.encode()).hexdigest()[:12]
         self._tracks = tracks
 
+    async def get_track(self, prov_track_id: str) -> Track:
+        """Return full details for a queued CD track, if its disc is still present."""
+        try:
+            disc_id, track_text = prov_track_id.rsplit(":", 1)
+            track_number = int(track_text)
+        except (ValueError, AttributeError) as err:
+            raise DriveError(f"Invalid CD track id: {prov_track_id}") from err
+
+        await self._refresh_disc()
+        if disc_id != self._disc_id:
+            raise DriveError("The disc has changed since this track was added to the queue")
+        duration = dict(self._tracks).get(track_number)
+        if duration is None:
+            raise DriveError(f"Track {track_number} is not present on the current disc")
+
+        return Track(
+            item_id=prov_track_id,
+            provider=self.instance_id,
+            name=f"Track {track_number:02d}",
+            duration=duration,
+            track_number=track_number,
+            provider_mappings={
+                ProviderMapping(
+                    item_id=prov_track_id,
+                    provider_domain=self.domain,
+                    provider_instance=self.instance_id,
+                    available=True,
+                    audio_format=AudioFormat(
+                        content_type=ContentType.PCM_S16LE,
+                        codec_type=ContentType.PCM_S16LE,
+                        sample_rate=44100,
+                        bit_depth=16,
+                        channels=2,
+                    ),
+                )
+            },
+        )
+
     async def browse(self, path: str) -> Sequence[Track | BrowseFolder]:
         """List the tracks on the disc currently in the drive."""
         try:
