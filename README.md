@@ -4,31 +4,52 @@ A Music Assistant music provider for playing physical audio CDs directly from a 
 
 ## Goals
 
-- Expose audio CD tracks through Music Assistant's normal music browsing and playback/queue experience.
-- Stream digital PCM audio directly from the optical drive at playback time.
+- Expose the inserted audio CD as temporary tracks in Music Assistant.
+- Stream digital PCM audio from the optical drive when requested.
 - Avoid permanent ripping or storing complete track files.
-- Detect disc insertion and removal.
-- Provide track metadata and album artwork where available.
-- Support ejecting the disc.
+- Reject queued tracks if the disc has changed.
+- Add metadata, artwork, insertion/removal notifications and eject support in follow-up milestones.
 
-## Development status
+## Current status
 
-**Proof of concept: optical-drive access and raw PCM extraction verified. Provider implementation not yet complete.**
+**Early provider implementation and image packaging are in progress; playback has not yet been validated through Music Assistant.**
 
-Test environment:
+Verified on the target Home Assistant OS system:
 
-- Home Assistant OS
-- Music Assistant server image: `ghcr.io/music-assistant/server:2.10.13`
+- Music Assistant server: `ghcr.io/music-assistant/server:2.10.13`
 - USB optical drive: Slimtype eBAU108
 - Device nodes: `/dev/sr0` and `/dev/sg1`
-- Linux reports 16 audio tracks on the test disc.
-- `cdparanoia` successfully enumerated the disc and streamed raw CDDA PCM to stdout.
+- Linux detects a 16-track audio CD.
+- `cdparanoia` successfully enumerates tracks and emits raw CDDA PCM to stdout.
+- The initial provider code exposes tracks and supplies raw PCM through Music Assistant's custom-stream interface.
 
-The test environment demonstrated that the drive can be accessed from a suitably configured Music Assistant container. Installing `cdparanoia` interactively in a running container is not persistent; a reproducible packaging approach is still required.
+## Build
 
-## Compatibility
+The Dockerfile extends the official Music Assistant 2.10.13 image, installs the system package `cdparanoia`, and copies the provider into Music Assistant's installed provider directory.
 
-The initial implementation should target the Music Assistant provider API supported by the selected server version. Compatibility with later Music Assistant releases will be assessed separately.
+GitHub Actions builds and publishes multi-architecture images to:
+
+`ghcr.io/decibelnet/music-assistant-cd`
+
+The `main` branch publishes the tags `2.10.13` and `latest`. GitHub Container Registry packages are private by default in some repository configurations; set the package visibility to **Public** before using the image from Home Assistant OS without registry credentials.
+
+## Home Assistant OS app
+
+Use the custom image below in the local Music Assistant app's `config.yaml` after the GHCR image has been published and made public:
+
+```yaml
+image: ghcr.io/decibelnet/music-assistant-cd:2.10.13
+```
+
+Keep the existing custom app slug, data directory, device mappings and permissions unchanged. In particular, preserve access to `/dev/sr0` and `/dev/sg1`. Do not replace or remove the original Music Assistant app or its data.
+
+## Known limitations
+
+- The provider currently labels items as Track 01, Track 02, etc.
+- Album/track metadata and artwork lookup are not implemented yet.
+- Disc insertion/removal notifications and eject are not implemented yet.
+- Seeking currently reads from the start of a track and discards the requested initial PCM bytes; this is correct but not yet optimized.
+- The provider has not yet been tested end-to-end through the Music Assistant queue and player pipeline.
 
 ## Design principles
 
@@ -36,17 +57,4 @@ The initial implementation should target the Music Assistant provider API suppor
 - Do not create permanent ripped audio files.
 - Keep optical-drive operations isolated behind a small drive-access layer.
 - Handle disc changes and read errors cleanly.
-- Do not interfere with the user's existing Music Assistant installation or data.
-
-## Planned work
-
-1. Confirm the provider API and packaging approach for the target Music Assistant version.
-2. Implement drive discovery, TOC reading, track enumeration, and eject.
-3. Implement streaming of PCM audio from the selected track.
-4. Add metadata and artwork lookup.
-5. Handle disc insertion/removal and queue behaviour.
-6. Add tests and installation documentation.
-
-## Safety
-
-This project is experimental. Test with a separate Music Assistant instance and back up configuration before changing a production installation.
+- Test with the separate custom app and preserve the original installation and data.
