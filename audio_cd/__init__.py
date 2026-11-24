@@ -54,7 +54,12 @@ def _parse_tracks(output: str) -> list[tuple[int, int]]:
 async def setup(mass, manifest, config):
     """Set up the audio CD provider."""
     provider = AudioCDProvider(mass, manifest, config, SUPPORTED_FEATURES)
-    await provider._refresh_disc()
+    # Allow setup with an empty drive; the disc may be inserted later.
+    try:
+        await provider._refresh_disc()
+    except DriveError:
+        provider._disc_id = None
+        provider._tracks = []
     return provider
 
 
