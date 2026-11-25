@@ -6,7 +6,12 @@ No audio is written to disk: track bytes are streamed from the child process std
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from collections.abc import AsyncGenerator
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class DriveError(RuntimeError):
@@ -46,6 +51,7 @@ class CDDrive:
         if track_number < 1:
             raise ValueError("Track numbers are 1-based and must be positive")
 
+        read_started = time.monotonic()
         try:
             proc = await asyncio.create_subprocess_exec(
                 "cdparanoia",
@@ -62,9 +68,27 @@ class CDDrive:
                 "cdparanoia is not installed in the Music Assistant container"
             ) from err
 
+        process_started = time.monotonic()
+        LOGGER.info(
+            "CD read track %s: cdparanoia process started in %.3f s",
+            track_number,
+            process_started - read_started,
+        )
         assert proc.stdout is not None
+        first_chunk = True
         try:
             while chunk := await proc.stdout.read(64 * 1024):
+                if first_chunk:
+                    first_chunk = False
+                    first_pcm_at = time.monotonic()
+                    LOGGER.info(
+                        "CD read track %s: first PCM chunk (%s bytes) arrived %.3f s "
+                        "after process start (%.3f s total)",
+                        track_number,
+                        len(chunk),
+                        first_pcm_at - process_started,
+                        first_pcm_at - read_started,
+                    )
                 yield chunk
             return_code = await proc.wait()
             if return_code != 0:
