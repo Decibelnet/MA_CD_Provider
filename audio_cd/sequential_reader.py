@@ -168,10 +168,12 @@ class SequentialCDReader:
 
         self._consumers.add(track_number)
         queue = self._queues[track_number]
+        completed = False
         try:
             while True:
                 entry = await queue.get()
                 if isinstance(entry, _EndOfTrack):
+                    completed = True
                     return
                 if isinstance(entry, _ReadFailure):
                     raise SequentialReaderError(str(entry.error)) from entry.error
@@ -180,8 +182,12 @@ class SequentialCDReader:
             self._consumers.discard(track_number)
             # If MA cancels a stream (for example, during a seek), discard the
             # rest of that track so the one physical reader can move forward.
-            if not queue.empty():
+            if not completed:
                 self._discarded.add(track_number)
+                # Release a producer blocked by this track's bounded queue.
+                while not queue.empty():
+                    with contextlib.suppress(asyncio.QueueEmpty):
+                        queue.get_nowait()
 
     async def _read_sequentially(self, start_track: int) -> None:
         assert self._process is None
