@@ -16,6 +16,7 @@ from music_assistant_models.enums import (
 )
 from music_assistant_models.media_items import (
     AudioFormat,
+    Album,
     BrowseFolder,
     ProviderMapping,
     Track,
@@ -46,9 +47,8 @@ def _parse_tracks(output: str) -> list[tuple[int, int]]:
         times = _TIME_RE.findall(line)
         if len(times) < 2:
             continue
-        start = _time_to_seconds(":".join(times[0][:2]) + "." + times[0][2])
-        end = _time_to_seconds(":".join(times[1][:2]) + "." + times[1][2])
-        duration = max(0, end - start)
+        # cdparanoia reports track length first, then absolute start offset.
+        duration = _time_to_seconds(":".join(times[0][:2]) + "." + times[0][2])
         if duration:
             tracks.append((int(match.group(1)), duration))
     return tracks
@@ -117,30 +117,37 @@ class AudioCDProvider(MusicProvider):
             self._tracks = tracks
             self._disc_checked_at = time.monotonic()
 
-    async def get_track(self, prov_track_id: str) -> Track:
-        """Return full details for a queued CD track, if its disc is still present."""
-        try:
-            disc_id, track_text = prov_track_id.rsplit(":", 1)
-            track_number = int(track_text)
-        except (ValueError, AttributeError) as err:
-            raise DriveError(f"Invalid CD track id: {prov_track_id}") from err
-
-        await self._refresh_disc()
-        if disc_id != self._disc_id:
-            raise DriveError("The disc has changed since this track was added to the queue")
-        duration = dict(self._tracks).get(track_number)
-        if duration is None:
-            raise DriveError(f"Track {track_number} is not present on the current disc")
-
-        return Track(
-            item_id=prov_track_id,
+    def _make_album(self) -> Album:
+        """Represent the currently inserted disc as a single album item."""
+        assert self._disc_id is not None
+        return Album(
+            item_id=self._disc_id,
             provider=self.instance_id,
-            name=f"Track {track_number:02d}",
-            duration=duration,
-            track_number=track_number,
+            name="Audio CD",
             provider_mappings={
                 ProviderMapping(
-                    item_id=prov_track_id,
+                    item_id=self._disc_id,
+                    provider_domain=self.domain,
+                    provider_instance=self.instance_id,
+                    available=True,
+                )
+            },
+        )
+
+    def _make_track(self, number: int, duration: int, album: Album) -> Track:
+        """Create one ordered track item associated with the current disc album."""
+        track_id = f"{self._disc_id}:{number}"
+        return Track(
+            item_id=track_id,
+            provider=self.instance_id,
+            name=f"Track {number:02d}",
+            duration=duration,
+            track_number=number,
+            disc_number=1,
+            album=album,
+            provider_mappings={
+                ProviderMapping(
+                    item_id=track_id,
                     provider_domain=self.domain,
                     provider_instance=self.instance_id,
                     available=True,
@@ -155,38 +162,45 @@ class AudioCDProvider(MusicProvider):
             },
         )
 
-    async def browse(self, path: str) -> Sequence[Track | BrowseFolder]:
-        """List the tracks on the disc currently in the drive."""
+    async def get_album(self, prov_album_id: str) -> Album:
+        """Return album metadata for the currently inserted CD."""
+        await self._refresh_disc()
+        if prov_album_id != self._disc_id:
+            raise DriveError("The disc has changed since this album was browsed")
+        return self._make_album()
+
+    async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
+        """Return all tracks from the current CD in physical TOC order."""
+        await self._refresh_disc()
+        if prov_album_id != self._disc_id:
+            raise DriveError("The disc has changed since this album was browsed")
+        album = self._make_album()
+        return [self._make_track(number, duration, album) for number, duration in self._tracks]
+
+    async def get_track(self, prov_track_id: str) -> Track:
+        """Return full details for a queued CD track, if its disc is still present."""
+        try:
+            disc_id, track_text = prov_track_id.rsplit(":", 1)
+            track_number = int(track_text)
+        except (ValueError, AttributeError) as err:
+            raise DriveError(f"Invalid CD track id: {prov_track_id}") from err
+
+        await self._refresh_disc()
+        if disc_id != self._disc_id:
+            raise DriveError("The disc has changed since this track was added to the queue")
+        duration = dict(self._tracks).get(track_number)
+        if duration is None:
+            raise DriveError(f"Track {track_number} is not present on the current disc")
+        return self._make_track(track_number, duration, self._make_album())
+
+    async def browse(self, path: str) -> Sequence[Track | Album | BrowseFolder]:
+        """Show the inserted disc as a single album, with all tracks under it."""
         try:
             # Browsing explicitly checks the drive so inserted/removed discs show promptly.
             await self._refresh_disc(force=True)
         except DriveError:
             return []
-        return [
-            Track(
-                item_id=f"{self._disc_id}:{number}",
-                provider=self.instance_id,
-                name=f"Track {number:02d}",
-                duration=duration,
-                track_number=number,
-                provider_mappings={
-                    ProviderMapping(
-                        item_id=f"{self._disc_id}:{number}",
-                        provider_domain=self.domain,
-                        provider_instance=self.instance_id,
-                        available=True,
-                        audio_format=AudioFormat(
-                            content_type=ContentType.PCM_S16LE,
-                            codec_type=ContentType.PCM_S16LE,
-                            sample_rate=44100,
-                            bit_depth=16,
-                            channels=2,
-                        ),
-                    )
-                },
-            )
-            for number, duration in self._tracks
-        ]
+        return [self._make_album()]
 
     async def get_stream_details(
         self, item_id: str, media_type: MediaType
