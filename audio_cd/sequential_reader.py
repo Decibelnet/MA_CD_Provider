@@ -221,6 +221,10 @@ class SequentialCDReader:
                 view = memoryview(chunk)
                 offset = 0
                 while offset < len(view):
+                    if track_index >= len(selected_tracks):
+                        raise SequentialReaderError(
+                            "cdparanoia produced PCM beyond the final track"
+                        )
                     track_number = selected_tracks[track_index][0]
                     take = min(remaining, len(view) - offset)
                     piece = bytes(view[offset : offset + take])
