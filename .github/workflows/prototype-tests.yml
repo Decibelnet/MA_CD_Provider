@@ -1,9 +1,6 @@
 name: Prototype tests
 
 on:
-  push:
-    branches:
-      - feature/shared-sequential-cd-reader
   pull_request:
     branches:
       - main
