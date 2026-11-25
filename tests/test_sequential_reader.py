@@ -1,12 +1,25 @@
 """Unit tests for the experimental sequential CD reader."""
 
+import importlib.util
+import sys
 import unittest
+from pathlib import Path
 
-from audio_cd.sequential_reader import (
-    PCM_BYTES_PER_SECTOR,
-    SequentialReaderError,
-    split_pcm_chunks,
-)
+# Load the standalone module directly. Importing audio_cd.sequential_reader
+# would first execute audio_cd/__init__.py, which depends on the full Music
+# Assistant runtime. These tests intentionally exercise only the pure reader
+# module and should run in a clean Python environment.
+MODULE_PATH = Path(__file__).resolve().parents[1] / "audio_cd" / "sequential_reader.py"
+SPEC = importlib.util.spec_from_file_location("audio_cd_sequential_reader_test", MODULE_PATH)
+if SPEC is None or SPEC.loader is None:
+    raise ImportError(f"Cannot load sequential reader module from {MODULE_PATH}")
+sequential_reader = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = sequential_reader
+SPEC.loader.exec_module(sequential_reader)
+
+PCM_BYTES_PER_SECTOR = sequential_reader.PCM_BYTES_PER_SECTOR
+SequentialReaderError = sequential_reader.SequentialReaderError
+split_pcm_chunks = sequential_reader.split_pcm_chunks
 
 
 class SplitPCMChunksTests(unittest.TestCase):
