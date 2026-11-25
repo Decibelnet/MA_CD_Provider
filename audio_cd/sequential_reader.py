@@ -134,6 +134,7 @@ class SequentialCDReader:
             for number, _ in self.track_sectors
         }
         self._consumers: set[int] = set()
+        self._requested: set[int] = set()
         self._discarded: set[int] = set()
         self._process: asyncio.subprocess.Process | None = None
         self._producer: asyncio.Task[None] | None = None
@@ -146,9 +147,9 @@ class SequentialCDReader:
             raise SequentialReaderError("Reader is closed")
         if track_number not in self._queues:
             raise SequentialReaderError(f"Track {track_number} is not on this disc")
-        if track_number in self._consumers:
+        if track_number in self._requested:
             raise SequentialReaderError(
-                f"Track {track_number} already has an active stream consumer"
+                f"Track {track_number} can only be consumed once by this reader"
             )
 
         if self._producer is None:
@@ -167,6 +168,7 @@ class SequentialCDReader:
             )
 
         self._consumers.add(track_number)
+        self._requested.add(track_number)
         queue = self._queues[track_number]
         completed = False
         try:
