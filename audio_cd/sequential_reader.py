@@ -146,6 +146,7 @@ class SequentialCDReader:
         self._producer: asyncio.Task[None] | None = None
         self._start_track: int | None = None
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     async def stream_track(self, track_number: int) -> AsyncGenerator[bytes]:
         """Yield one track from the shared sequential read."""
@@ -217,11 +218,20 @@ class SequentialCDReader:
             "-",
         )
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+            startup = asyncio.create_task(
+                asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
             )
+            try:
+                self._process = await asyncio.shield(startup)
+            except asyncio.CancelledError:
+                # Shutdown owns the producer until startup settles, so a
+                # process created during cancellation is still reaped.
+                self._process = await startup
+                raise
             assert self._process.stdout is not None
             track_index = 0
             remaining = selected_tracks[0][1] * PCM_BYTES_PER_SECTOR
@@ -287,9 +297,13 @@ class SequentialCDReader:
 
     async def close(self) -> None:
         """Stop the shared process and release all reader resources."""
-        if self._closed:
-            return
-        self._closed = True
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._close_impl())
+        await asyncio.shield(self._close_task)
+
+    async def _close_impl(self) -> None:
+        """Perform cleanup once, independently of individual close callers."""
         # Cancel before draining queues so the producer cannot refill them.
         if self._producer is not None and not self._producer.done():
             self._producer.cancel()
