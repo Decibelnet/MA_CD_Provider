@@ -5,6 +5,7 @@ import asyncio
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import aclosing
 
+from .drive_access import DriveAccessCoordinator
 from .reader_manager import CDReaderManager
 from .sequential_reader import SequentialReaderError
 
@@ -15,6 +16,7 @@ class CDLifecycle:
     def __init__(
         self, device: str, track_sectors: Sequence[tuple[int, int]],
         idle_timeout: float = 90,
+        coordinator: DriveAccessCoordinator | None = None,
     ) -> None:
         if idle_timeout <= 0:
             raise ValueError("Idle timeout must be positive")
@@ -22,6 +24,9 @@ class CDLifecycle:
         self.track_sectors = tuple(track_sectors)
         self.idle_timeout = idle_timeout
         self._lock = asyncio.Lock()
+        self._coordinator = coordinator
+        self._ownership: object | None = None
+        self._acquiring: asyncio.Task[object] | None = None
         self._manager: CDReaderManager | None = None
         self._active = 0
         self._timer: asyncio.Task[None] | None = None
@@ -38,6 +43,31 @@ class CDLifecycle:
         if self._manager is not None:
             await self._manager.close()
             self._manager = None
+        self._release_ownership()
+
+    def _release_ownership(self) -> None:
+        if self._ownership is not None:
+            assert self._coordinator is not None
+            self._coordinator.release(self._ownership)
+            self._ownership = None
+
+    async def _acquire_ownership(self) -> None:
+        if self._coordinator is None:
+            return
+        task = asyncio.create_task(self._coordinator.acquire_reader())
+        self._acquiring = task
+        try:
+            self._ownership = await task
+        except asyncio.CancelledError:
+            # A completed acquisition can race with cancellation of its caller.
+            if task.done() and not task.cancelled():
+                self._ownership = task.result()
+                self._release_ownership()
+            if self._closed:
+                raise SequentialReaderError("Lifecycle is closed") from None
+            raise
+        finally:
+            self._acquiring = None
 
     async def _expire(self, manager: CDReaderManager) -> None:
         try:
@@ -75,7 +105,14 @@ class CDLifecycle:
                 raise SequentialReaderError("Lifecycle is closed")
             self._cancel_timer()
             if self._manager is None:
-                self._manager = CDReaderManager(self.device, self.track_sectors)
+                await self._acquire_ownership()
+                try:
+                    if self._closed:
+                        raise SequentialReaderError("Lifecycle is closed")
+                    self._manager = CDReaderManager(self.device, self.track_sectors)
+                except BaseException:
+                    self._release_ownership()
+                    raise
             manager = self._manager
             self._active += 1
         completed = False
@@ -97,6 +134,8 @@ class CDLifecycle:
     async def close(self) -> None:
         """Permanently close this lifecycle, sharing shutdown among callers."""
         self._closed = True
+        if self._acquiring is not None:
+            self._acquiring.cancel()
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._close())
         await asyncio.shield(self._close_task)
