@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
 import time
 from collections.abc import AsyncGenerator, Sequence
 
@@ -25,33 +24,10 @@ from music_assistant_models.streamdetails import StreamDetails
 from music_assistant.models.music_provider import MusicProvider
 
 from .drive import CDDrive, DriveError
+from .toc import parse_toc
 
 SUPPORTED_FEATURES = {ProviderFeature.BROWSE}
-_TIME_RE = re.compile(r"\[(\d+):(\d{2})\.(\d{2})\]")
 _DISC_CACHE_SECONDS = 5.0
-
-
-def _time_to_seconds(value: str) -> int:
-    minutes, remainder = value.split(":")
-    seconds, frames = remainder.split(".")
-    return int(minutes) * 60 + int(seconds) + round(int(frames) / 75)
-
-
-def _parse_tracks(output: str) -> list[tuple[int, int]]:
-    """Parse track number and duration from cdparanoia -Q output."""
-    tracks: list[tuple[int, int]] = []
-    for line in output.splitlines():
-        match = re.match(r"^\s*(\d+)\.", line)
-        if not match:
-            continue
-        times = _TIME_RE.findall(line)
-        if len(times) < 2:
-            continue
-        # cdparanoia reports track length first, then absolute start offset.
-        duration = _time_to_seconds(":".join(times[0][:2]) + "." + times[0][2])
-        if duration:
-            tracks.append((int(match.group(1)), duration))
-    return tracks
 
 
 async def setup(mass, manifest, config):
@@ -63,6 +39,7 @@ async def setup(mass, manifest, config):
     except DriveError:
         provider._disc_id = None
         provider._tracks = []
+        provider._track_sectors = []
     return provider
 
 
@@ -74,6 +51,7 @@ class AudioCDProvider(MusicProvider):
         self.drive = CDDrive("/dev/sr0")
         self._disc_id: str | None = None
         self._tracks: list[tuple[int, int]] = []
+        self._track_sectors: list[tuple[int, int]] = []
         self._disc_checked_at = 0.0
         self._disc_refresh_lock = asyncio.Lock()
 
@@ -104,17 +82,23 @@ class AudioCDProvider(MusicProvider):
 
             try:
                 output = await self.drive.query()
-                tracks = _parse_tracks(output)
+                try:
+                    toc = parse_toc(output)
+                except ValueError as err:
+                    raise DriveError(str(err)) from err
+                tracks = [(track.number, track.duration) for track in toc if track.duration]
                 if not tracks:
                     raise DriveError("No audio tracks were found on the inserted disc")
             except DriveError:
                 self._disc_id = None
                 self._tracks = []
+                self._track_sectors = []
                 self._disc_checked_at = 0.0
                 raise
 
             self._disc_id = hashlib.sha256(output.encode()).hexdigest()[:12]
             self._tracks = tracks
+            self._track_sectors = [(track.number, track.sectors) for track in toc]
             self._disc_checked_at = time.monotonic()
 
     def _make_album(self) -> Album:
