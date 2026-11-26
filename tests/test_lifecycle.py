@@ -1,9 +1,17 @@
 """Tests for standalone CD lifecycle coordination."""
 import asyncio
+import importlib
+import sys
+import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from audio_cd.lifecycle import CDLifecycle
+package = types.ModuleType("cd_lifecycle_test")
+package.__path__ = [str(Path(__file__).resolve().parents[1] / "audio_cd")]
+sys.modules[package.__name__] = package
+module = importlib.import_module("cd_lifecycle_test.lifecycle")
+CDLifecycle = module.CDLifecycle
 
 
 class FakeManager:
@@ -19,7 +27,7 @@ class FakeManager:
 
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.patcher = patch("audio_cd.lifecycle.CDReaderManager", FakeManager)
+        self.patcher = patch.object(module, "CDReaderManager", FakeManager)
         self.patcher.start()
         self.addCleanup(self.patcher.stop)
         self.lifecycle = CDLifecycle("fake", [(1, 1), (2, 1)], idle_timeout=0.03)
