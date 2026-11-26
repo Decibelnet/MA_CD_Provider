@@ -188,5 +188,75 @@ class SequentialCDReaderTests(unittest.IsolatedAsyncioTestCase):
             await stream.aclose()
 
 
+    async def test_concurrent_close_during_startup(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        process = _FakeProcess(b"", chunk_size=1024)
+
+        async def startup(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return process
+
+        reader = SequentialCDReader("/dev/test", [(1, 1)])
+        stream = reader.stream_track(1)
+        consumer = asyncio.create_task(anext(stream))
+        callers = []
+        try:
+            with patch.object(asyncio, "create_subprocess_exec", startup):
+                await asyncio.wait_for(started.wait(), 2)
+                callers.append(asyncio.create_task(reader.close()))
+                callers.append(asyncio.create_task(reader.close()))
+                with self.assertRaisesRegex(SequentialReaderError, "Reader is closed"):
+                    await asyncio.wait_for(consumer, 2)
+                self.assertFalse(callers[0].done())
+                self.assertFalse(callers[1].done())
+                release.set()
+                await asyncio.wait_for(asyncio.gather(*callers), 2)
+                self.assertTrue(process.terminated)
+                self.assertTrue(reader._producer.done())
+        finally:
+            release.set()
+            await reader.close()
+            await asyncio.gather(consumer, *callers, return_exceptions=True)
+            await stream.aclose()
+
+    async def test_cancelled_close_caller_does_not_cancel_cleanup(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        process = _FakeProcess(b"", chunk_size=1024)
+
+        async def startup(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return process
+
+        reader = SequentialCDReader("/dev/test", [(1, 1)])
+        stream = reader.stream_track(1)
+        consumer = asyncio.create_task(anext(stream))
+        caller = None
+        try:
+            with patch.object(asyncio, "create_subprocess_exec", startup):
+                await asyncio.wait_for(started.wait(), 2)
+                caller = asyncio.create_task(reader.close())
+                with self.assertRaisesRegex(SequentialReaderError, "Reader is closed"):
+                    await asyncio.wait_for(consumer, 2)
+                caller.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await caller
+                self.assertFalse(reader._close_task.done())
+                release.set()
+                await asyncio.wait_for(reader.close(), 2)
+                self.assertTrue(process.terminated)
+                self.assertTrue(reader._producer.done())
+        finally:
+            release.set()
+            await reader.close()
+            await asyncio.gather(consumer, return_exceptions=True)
+            if caller is not None:
+                await asyncio.gather(caller, return_exceptions=True)
+            await stream.aclose()
+
+
 if __name__ == "__main__":
     unittest.main()
