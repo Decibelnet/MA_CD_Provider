@@ -135,8 +135,54 @@ class MediaStatusTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(b.done())
                 self.assertEqual(len(calls), 1)
                 release.set()
-                self.assertEqual(await b, first)
+                self.assertEqual(await b, media.MediaObservation(
+                    media.DriveStatus.DISC_PRESENT, True, retained=True
+                ))
                 self.assertEqual(await observer.check(), second)
+                self.assertEqual(len(calls), 2)
+            finally:
+                release.set()
+                await asyncio.gather(*[t for t in (a, b) if t is not None],
+                                     return_exceptions=True)
+
+
+    async def test_retained_observation_after_repeated_cancellation(self):
+        observer = media.MediaStatus()
+        old = media.MediaObservation(media.DriveStatus.DISC_PRESENT, False)
+        fresh = media.MediaObservation(media.DriveStatus.NO_DISC, True)
+        entered = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        calls = []
+
+        def read(device):
+            calls.append(device)
+            if len(calls) == 1:
+                loop.call_soon_threadsafe(entered.set)
+                if not release.wait(5):
+                    raise RuntimeError("worker timed out")
+                return old
+            return fresh
+
+        with patch.object(media, "_read_media", side_effect=read):
+            a = asyncio.create_task(observer.check())
+            b = None
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                a.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await a
+                b = asyncio.create_task(observer.check())
+                await asyncio.sleep(0)
+                b.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await b
+                self.assertEqual(len(calls), 1)
+                release.set()
+                self.assertEqual(await observer.check(), media.MediaObservation(
+                    media.DriveStatus.DISC_PRESENT, False, retained=True
+                ))
+                self.assertEqual(await observer.check(), fresh)
                 self.assertEqual(len(calls), 2)
             finally:
                 release.set()
