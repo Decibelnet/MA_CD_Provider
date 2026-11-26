@@ -11,6 +11,9 @@ import time
 from collections.abc import AsyncGenerator
 
 
+from .drive_access import DriveAccessCoordinator
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -21,30 +24,73 @@ class DriveError(RuntimeError):
 class CDDrive:
     """Access one Linux optical drive through cdparanoia."""
 
-    def __init__(self, device: str = "/dev/sr0") -> None:
+    def __init__(
+        self, device: str = "/dev/sr0",
+        coordinator: DriveAccessCoordinator | None = None,
+    ) -> None:
         self.device = device
+        self._coordinator = coordinator
 
-    async def query(self) -> str:
-        """Return cdparanoia's disc/track table output."""
+    async def query(self) -> str | None:
+        """Return the TOC, or None if extraction owns the drive."""
+        token = None
+        if self._coordinator is not None:
+            token = await self._coordinator.acquire_query()
+            if token is None:
+                return None
+        startup = asyncio.create_task(asyncio.create_subprocess_exec(
+            "cdparanoia", "-Q", "-d", self.device,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        ))
+        communication = None
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "cdparanoia",
-                "-Q",
-                "-d",
-                self.device,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
+            proc = await asyncio.shield(startup)
+            communication = asyncio.create_task(proc.communicate())
+            output, _ = await asyncio.shield(communication)
+            text = output.decode("utf-8", errors="replace")
+            if proc.returncode != 0:
+                raise DriveError(text.strip() or f"cdparanoia exited with {proc.returncode}")
+            return text
         except FileNotFoundError as err:
             raise DriveError(
                 "cdparanoia is not installed in the Music Assistant container"
             ) from err
+        finally:
+            cleanup = asyncio.create_task(
+                self._finish_query(startup, communication, token)
+            )
+            await asyncio.shield(cleanup)
 
-        output, _ = await proc.communicate()
-        text = output.decode("utf-8", errors="replace")
-        if proc.returncode != 0:
-            raise DriveError(text.strip() or f"cdparanoia exited with {proc.returncode}")
-        return text
+    async def _finish_query(self, startup, communication, token) -> None:
+        """Keep ownership until startup and physical process cleanup finish."""
+        try:
+            proc = await startup
+        except Exception:
+            # Subprocess creation failed; there is no process to clean up.
+            if token is not None:
+                self._coordinator.release(token)
+            return
+
+        if communication is None:
+            communication = asyncio.create_task(proc.communicate())
+        if proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(asyncio.shield(communication), 2)
+            except TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+        # Drain the pipes even after termination to avoid pipe backpressure.
+        await communication
+        await proc.wait()
+        if token is not None:
+            self._coordinator.release(token)
 
     async def stream_track(self, track_number: int) -> AsyncGenerator[bytes]:
         """Yield raw 44.1 kHz, 16-bit stereo PCM for one 1-based track."""
