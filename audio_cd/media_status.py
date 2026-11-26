@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum
 
 CDROM_DRIVE_STATUS = 0x5326
@@ -27,6 +27,7 @@ class MediaObservation:
     status: DriveStatus
     changed: bool | None
     error: str | None = None
+    retained: bool = False
 
 
 def _read_media(device: str) -> MediaObservation:
@@ -65,6 +66,7 @@ class MediaStatus:
 
     async def check(self) -> MediaObservation:
         async with self._lock:
+            retained = self._pending is not None
             if self._pending is None:
                 self._pending = asyncio.create_task(
                     asyncio.to_thread(_read_media, self.device)
@@ -78,4 +80,4 @@ class MediaStatus:
                 self._pending = None
                 raise
             self._pending = None
-            return result
+            return replace(result, retained=True) if retained else result
