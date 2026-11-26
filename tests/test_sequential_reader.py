@@ -172,6 +172,11 @@ class SequentialCDReaderTests(unittest.IsolatedAsyncioTestCase):
         try:
             with patch.object(asyncio, "create_subprocess_exec", return_value=process):
                 self.assertEqual(await asyncio.wait_for(anext(stream), timeout=2), b"x" * 512)
+                # The producer needs a turn to refill the bounded queue.
+                for _ in range(100):
+                    if reader._queues[1].full():
+                        break
+                    await asyncio.sleep(0.001)
                 self.assertTrue(reader._queues[1].full())
                 await asyncio.wait_for(reader.close(), timeout=2)
                 with self.assertRaisesRegex(SequentialReaderError, "Reader is closed"):
