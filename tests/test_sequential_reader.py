@@ -131,5 +131,57 @@ class SequentialCDReaderTests(unittest.IsolatedAsyncioTestCase):
             await reader.close()
 
 
+    async def test_close_wakes_blocked_consumers(self) -> None:
+        reading = asyncio.Event()
+
+        class BlockingStdout:
+            async def read(self, requested: int) -> bytes:
+                reading.set()
+                await asyncio.Future()
+                return b""
+
+        process = _FakeProcess(b"", chunk_size=1024)
+        process.stdout = BlockingStdout()
+        reader = SequentialCDReader("/dev/test", [(1, 1), (2, 1)])
+        streams = [reader.stream_track(number) for number in (1, 2)]
+        tasks = []
+        try:
+            with patch.object(asyncio, "create_subprocess_exec", return_value=process):
+                tasks = [asyncio.create_task(anext(stream)) for stream in streams]
+                await asyncio.wait_for(reading.wait(), timeout=2)
+                self.assertEqual(reader._consumers, {1, 2})
+                await asyncio.wait_for(reader.close(), timeout=2)
+                for task in tasks:
+                    with self.assertRaisesRegex(SequentialReaderError, "Reader is closed"):
+                        await asyncio.wait_for(task, timeout=2)
+                self.assertTrue(process.terminated)
+        finally:
+            await reader.close()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for stream in streams:
+                await stream.aclose()
+
+    async def test_close_with_full_queue(self) -> None:
+        process = _FakeProcess(b"x" * PCM_BYTES_PER_SECTOR, chunk_size=512)
+        reader = SequentialCDReader(
+            "/dev/test", [(1, 1)], buffer_bytes=512, chunk_size=512
+        )
+        stream = reader.stream_track(1)
+        try:
+            with patch.object(asyncio, "create_subprocess_exec", return_value=process):
+                self.assertEqual(await asyncio.wait_for(anext(stream), timeout=2), b"x" * 512)
+                self.assertTrue(reader._queues[1].full())
+                await asyncio.wait_for(reader.close(), timeout=2)
+                with self.assertRaisesRegex(SequentialReaderError, "Reader is closed"):
+                    await asyncio.wait_for(anext(stream), timeout=2)
+                self.assertTrue(process.terminated)
+                self.assertTrue(reader._producer.done())
+        finally:
+            await reader.close()
+            await stream.aclose()
+
+
 if __name__ == "__main__":
     unittest.main()
