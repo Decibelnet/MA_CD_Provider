@@ -95,7 +95,13 @@ class _ReadFailure:
     error: BaseException
 
 
+@dataclass(frozen=True, slots=True)
+class _ReaderClosed:
+    pass
+
+
 _END = _EndOfTrack()
+_CLOSED = _ReaderClosed()
 
 
 class SequentialCDReader:
@@ -129,7 +135,7 @@ class SequentialCDReader:
         self.track_sectors = tuple(track_sectors)
         self.chunk_size = chunk_size
         queue_chunks = max(1, buffer_bytes // chunk_size)
-        self._queues: dict[int, asyncio.Queue[bytes | _EndOfTrack | _ReadFailure]] = {
+        self._queues: dict[int, asyncio.Queue[bytes | _EndOfTrack | _ReadFailure | _ReaderClosed]] = {
             number: asyncio.Queue(maxsize=queue_chunks)
             for number, _ in self.track_sectors
         }
@@ -174,6 +180,8 @@ class SequentialCDReader:
         try:
             while True:
                 entry = await queue.get()
+                if isinstance(entry, _ReaderClosed):
+                    raise SequentialReaderError("Reader is closed")
                 if isinstance(entry, _EndOfTrack):
                     completed = True
                     return
@@ -282,8 +290,17 @@ class SequentialCDReader:
         if self._closed:
             return
         self._closed = True
+        # Cancel before draining queues so the producer cannot refill them.
         if self._producer is not None and not self._producer.done():
             self._producer.cancel()
+        # Closing abandons buffered PCM and wakes every active consumer.
+        # No await here: even a full queue must accept the shutdown marker.
+        for number, queue in self._queues.items():
+            while not queue.empty():
+                queue.get_nowait()
+            if number in self._consumers:
+                queue.put_nowait(_CLOSED)
+        if self._producer is not None and not self._producer.done():
             with contextlib.suppress(asyncio.CancelledError):
                 await self._producer
         process = self._process
